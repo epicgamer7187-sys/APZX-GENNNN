@@ -9,18 +9,19 @@
     },
     "censor": true,
     "9captcha": {
-        "api_key": "PASTE_YOUR_9CAPTCHA_KEY",
+        "api_key": "9cap-9a86fee7-9162-4d45-9030-de73d4a6f4e4",
         "extension_solver": false,
         "req_solver": true,
         "url": "https://9captcha-api.pridesmp.fun"
     },
     "mail_services": {
         "duckmail": {
-            "enabled": false
+            "enabled": true,
+            "password": "2PHJvXSqDKaS"
         },
         "cybertemp": {
             "enabled": false,
-            "api_key": "PASTE_CYBERTEMP_KEY_OR_USE_ENV_VAR",
+            "api_key": "",
             "domains": [
                 "sexymeowers.site",
                 "xpromail.xyz",
@@ -40,8 +41,8 @@
             "mailcode": "outlook2"
         },
         "zeus": {
-            "enabled": true,
-            "api_key": "PASTE_ZEUS_KEY",
+            "enabled": false,
+            "api_key": "",
             "mailcode": "Hotmail_Trusted"
         },
         "draxono": {
