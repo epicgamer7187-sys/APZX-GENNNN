@@ -9,7 +9,7 @@ from collections import deque
 
 # ──── Pre-check imports before anything else ────
 try:
-    from flask import Flask, render_template, send_from_directory
+    from flask import Flask, render_template, send_from_directory, request, jsonify, Response
     HAS_FLASK = True
 except ImportError:
     HAS_FLASK = False
@@ -36,6 +36,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 
+# Headless when pywebview is missing, or forced via env
+HEADLESS = os.environ.get("APZX_HEADLESS") == "1" or not HAS_WEBVIEW
+
 # Precompiled ANSI escape stripper for terminal output
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 
@@ -46,9 +49,78 @@ app = Flask(
     static_folder=os.path.join(BASE_DIR, 'gui_static')
 )
 
+# Optional HTTP Basic auth — set both vars to lock the public URL
+_AUTH_USER = os.environ.get("APZX_USER", "")
+_AUTH_PASS = os.environ.get("APZX_PASS", "")
+
+
+@app.before_request
+def _require_auth():
+    if not (_AUTH_USER and _AUTH_PASS):
+        return None
+    if request.path == "/health":
+        return None
+    a = request.authorization
+    if a and a.username == _AUTH_USER and a.password == _AUTH_PASS:
+        return None
+    return Response(
+        "APZX: authentication required", 401,
+        {"WWW-Authenticate": 'Basic realm="APZX"'}
+    )
+
+
+# Shim that gives the browser a window.pywebview.api backed by fetch().
+# index.html needs no modification because of this.
+_SHIM = """<script>
+(function(){
+  var post = function(p, b){
+    return fetch(p, {method:'POST', headers:{'Content-Type':'application/json'},
+                     body: JSON.stringify(b || {})});
+  };
+  var jpost = function(p, b){ return post(p, b).then(function(r){ return r.json(); }); };
+  var get = function(p){ return fetch(p).then(function(r){ return r.text(); }); };
+  var jget = function(p){ return fetch(p).then(function(r){ return r.json(); }); };
+
+  window.pywebview = { api: {
+    start_process:      function(t, d){ return post('/api/start', {target:t, data:d || null}); },
+    stop_process:       function(){ return post('/api/stop'); },
+    get_logs:           function(){ return get('/api/logs'); },
+    get_status_updates: function(){ return jget('/api/status'); },
+    load_config:        function(){ return jget('/api/config'); },
+    save_config:        function(c){ return jpost('/api/config', c); },
+    save_theme:         function(h){ return jpost('/api/theme', {color:h}); },
+    get_input_files:    function(){ return jget('/api/files'); },
+    read_input_file:    function(f){ return get('/api/file?name=' + encodeURIComponent(f)); },
+    save_input_file:    function(f, c){ return jpost('/api/file', {name:f, content:c}); }
+  }};
+
+  function fire(){
+    try { window.dispatchEvent(new Event('pywebviewready')); } catch(e){}
+    try { document.dispatchEvent(new Event('pywebviewready')); } catch(e){}
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function(){ setTimeout(fire, 0); });
+  } else {
+    setTimeout(fire, 0);
+  }
+})();
+</script>"""
+
+
+def _inject_shim(html: str) -> str:
+    """Insert the shim as the first element inside <head> so it beats app scripts."""
+    m = re.search(r'<head[^>]*>', html, re.IGNORECASE)
+    if m:
+        return html[:m.end()] + "\n" + _SHIM + "\n" + html[m.end():]
+    m = re.search(r'<html[^>]*>', html, re.IGNORECASE)
+    if m:
+        return html[:m.end()] + "\n" + _SHIM + "\n" + html[m.end():]
+    return _SHIM + html
+
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return Response(_inject_shim(render_template('index.html')), mimetype='text/html')
 
 @app.route('/app-icon')
 def app_icon():
@@ -57,7 +129,6 @@ def app_icon():
 @app.route('/health')
 def health():
     return 'OK', 200
-
 
 
 class WindowController:
@@ -359,30 +430,81 @@ class WindowController:
             self.current_process = None
 
 
+controller = WindowController()
+
+# ──── HTTP bridge (replaces the pywebview js_api) ────
+@app.route('/api/start', methods=['POST'])
+def api_start():
+    d = request.get_json(silent=True) or {}
+    controller.start_process(d.get('target'), d.get('data'))
+    return jsonify(True)
+
+@app.route('/api/stop', methods=['POST'])
+def api_stop():
+    controller.stop_process()
+    return jsonify(True)
+
+@app.route('/api/logs')
+def api_logs():
+    return Response(controller.get_logs() or "", mimetype='text/plain')
+
+@app.route('/api/status')
+def api_status():
+    return jsonify(controller.get_status_updates())
+
+@app.route('/api/config', methods=['GET'])
+def api_config_get():
+    return jsonify(controller.load_config())
+
+@app.route('/api/config', methods=['POST'])
+def api_config_set():
+    return jsonify(bool(controller.save_config(request.get_json(silent=True) or {})))
+
+@app.route('/api/theme', methods=['POST'])
+def api_theme():
+    d = request.get_json(silent=True) or {}
+    return jsonify(bool(controller.save_theme(d.get('color', '#00f8dc'))))
+
+@app.route('/api/files')
+def api_files():
+    return jsonify(controller.get_input_files())
+
+@app.route('/api/file', methods=['GET'])
+def api_file_get():
+    return Response(controller.read_input_file(request.args.get('name', '')), mimetype='text/plain')
+
+@app.route('/api/file', methods=['POST'])
+def api_file_set():
+    d = request.get_json(silent=True) or {}
+    return jsonify(bool(controller.save_input_file(d.get('name', ''), d.get('content', ''))))
+
+
 # ──── Entry Point ────
 if __name__ == "__main__":
-    controller = WindowController()
-
-    # Start Flask in background (silent — suppress dev server warnings)
+    # Start Flask (suppress dev server warnings)
     import logging
     logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
 
-    # Find a free port (start at 5001)
-    import socket
-    def _find_free_port(start=5001, count=10):
-        for port in range(start, start + count):
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                try:
-                    s.bind(('127.0.0.1', port))
-                    return port
-                except OSError:
-                    continue
-        return start
+    # Railway injects $PORT; fall back to 5001 locally
+    if os.environ.get("PORT"):
+        _PORT = int(os.environ["PORT"])
+    else:
+        import socket
+        def _find_free_port(start=5001, count=10):
+            for port in range(start, start + count):
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    try:
+                        s.bind(('127.0.0.1', port))
+                        return port
+                    except OSError:
+                        continue
+            return start
+        _PORT = _find_free_port(5001)
 
-    _PORT = _find_free_port(5001)
+    _HOST = "0.0.0.0" if HEADLESS else "127.0.0.1"
 
     def _run_flask():
-        app.run(host='127.0.0.1', port=_PORT, debug=False, use_reloader=False)
+        app.run(host=_HOST, port=_PORT, debug=False, use_reloader=False, threaded=True)
 
     flask_thread = threading.Thread(target=_run_flask, daemon=True)
     flask_thread.start()
@@ -402,10 +524,19 @@ if __name__ == "__main__":
         sys.exit(1)
 
     url = f"http://127.0.0.1:{_PORT}"
-    print(f"[APZX] Flask ready on port {_PORT}")
-    import webbrowser
+    print(f"[APZX] Flask ready on {_HOST}:{_PORT}", flush=True)
 
-    # Try pywebview first
+    if HEADLESS:
+        print("[APZX] Headless mode — open the Railway URL in a browser.", flush=True)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            controller.close()
+            sys.exit(0)
+
+    # Local desktop mode — try pywebview first
+    import webbrowser
     if HAS_WEBVIEW:
         try:
             webview.create_window(
@@ -420,7 +551,7 @@ if __name__ == "__main__":
             # Prefer edgechromium on Windows, default on other OS
             gui = "edgechromium" if sys.platform == "win32" else None
             webview.start(debug=False, gui=gui)
-        except Exception as e:
+        except Exception:
             webbrowser.open(url)
     else:
         webbrowser.open(url)
