@@ -1,0 +1,8 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+engine/auth_joiner/node_modules
+output/*.txt
+debug_register.txt
+*.bat
