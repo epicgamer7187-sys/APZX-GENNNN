@@ -11,9 +11,11 @@ tls_client
 primp
 pyfiglet
 
-# GUI (optional — uncomment if using Start-GUI.bat)
-# flask
-# pywebview
+# Web GUI server (Railway)
+flask
+
+# NOTE: pywebview is intentionally omitted - no GTK/WebKit on the server,
+# it would hang in webview.start(). The GUI runs in browser mode instead.
 
 # Extension browser (for 9Captcha extension solver)
 # playwright
